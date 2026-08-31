@@ -749,6 +749,7 @@ const heatSources = Array.from({ length: MAX_SOURCES }, () => ({ start: -1000, p
 const defaultCameraPosition = new THREE.Vector3()
 const defaultTarget = new THREE.Vector3()
 const projectedPoint = new THREE.Vector3()
+const modelBounds = new THREE.Sphere(new THREE.Vector3(), 0)
 const pointerPixel = new THREE.Vector2(-200, -200)
 const cursorRingPixel = new THREE.Vector2(-200, -200)
 let nextSource = 0
@@ -759,6 +760,7 @@ let peakHeat = 0
 let cursorScale = 0.6
 let cursorTargetScale = 0.6
 let shellsVisible = false
+let hoverPending = false
 
 // A trailing ring and an exact dot: the ring lags just enough to feel weighted.
 function updateCursor(deltaTime) {
@@ -768,6 +770,14 @@ function updateCursor(deltaTime) {
   cursorRing.style.transform =
     `translate3d(${cursorRingPixel.x}px, ${cursorRingPixel.y}px, 0) scale(${cursorScale.toFixed(3)})`
   cursorDot.style.transform = `translate3d(${pointerPixel.x}px, ${pointerPixel.y}px, 0)`
+}
+
+// The model is a few thousand triangles per mesh with no acceleration structure,
+// so a full intersect costs ~4ms. Reject rays that miss its bounds outright.
+function raycastModel() {
+  raycaster.setFromCamera(pointer, camera)
+  if (!raycaster.ray.intersectsSphere(modelBounds)) return null
+  return raycaster.intersectObjects(clickableMeshes, false)[0] || null
 }
 
 function getHitWorldNormal(hit) {
@@ -796,8 +806,7 @@ function triggerRandomPulse(fromPointer = true) {
   if (!model) return
   for (let attempt = 0; attempt < 32; attempt += 1) {
     pointer.set(THREE.MathUtils.randFloat(-0.5, 0.5), THREE.MathUtils.randFloat(-0.36, 0.42))
-    raycaster.setFromCamera(pointer, camera)
-    const hit = raycaster.intersectObjects(clickableMeshes, false)[0]
+    const hit = raycastModel()
     if (hit) {
       applyHeat(hit.point, hit.object.userData.thermalMeshId, getHitWorldNormal(hit), fromPointer)
       return
@@ -880,6 +889,7 @@ function placeAndFrameModel(root) {
   const size = box.getSize(new THREE.Vector3())
   const target = new THREE.Vector3(0, size.y * 0.46 + 0.04, 0)
   const sphere = box.getBoundingSphere(new THREE.Sphere())
+  modelBounds.copy(sphere)
   const halfFov = THREE.MathUtils.degToRad(camera.fov * 0.5)
   const distance = (sphere.radius / Math.sin(halfFov)) * 1.08
   const viewDirection = new THREE.Vector3(0.9, 0.34, 1.45).normalize()
@@ -961,14 +971,22 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
 renderer.domElement.addEventListener('pointermove', (event) => {
   if (pointerPressed && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5) dragging = true
 
-  if (!model) return
+  // Only record the position here; the raycast happens once per frame, and not
+  // at all while orbiting, where the hover state is not used.
+  if (!model || pointerPressed) return
   updatePointer(event)
-  raycaster.setFromCamera(pointer, camera)
-  const overObject = raycaster.intersectObjects(clickableMeshes, false).length > 0
+  hoverPending = true
+})
+
+function updateHoverState() {
+  if (!hoverPending || !model) return
+  hoverPending = false
+
+  const overObject = raycastModel() !== null
   renderer.domElement.classList.toggle('is-over-object', overObject)
   cursorElement.classList.toggle('is-over', overObject)
   if (!pointerPressed) cursorTargetScale = overObject ? 1 : 0.6
-})
+}
 
 renderer.domElement.addEventListener('pointerleave', () => {
   renderer.domElement.classList.remove('is-over-object')
@@ -983,8 +1001,7 @@ renderer.domElement.addEventListener('pointerup', (event) => {
   if (!model || dragging) return
 
   updatePointer(event)
-  raycaster.setFromCamera(pointer, camera)
-  const hit = raycaster.intersectObjects(clickableMeshes, false)[0]
+  const hit = raycastModel()
   if (hit) applyHeat(hit.point, hit.object.userData.thermalMeshId, getHitWorldNormal(hit))
 })
 
@@ -1135,11 +1152,10 @@ function animate() {
   sensorPass.uniforms.uTime.value = now
 
   updateEmbers(deltaTime, now)
+  updateHoverState()
   updateCursor(deltaTime)
   controls.update()
   composer.render()
 }
-
-window.__dbg = { renderer, scene, ground, groundMaterial, keyLight, contactShadow }
 
 animate()
