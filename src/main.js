@@ -5,63 +5,56 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 
-const MAX_PULSES = 6
+const MAX_SOURCES = 8
 
 document.querySelector('#app').innerHTML = `
-  <main class="experience" aria-label="Interactive Google logo object study">
+  <main class="experience" aria-label="Interactive thermal imaging study">
     <div class="stage" id="stage"></div>
-    <div class="soft-light"></div>
 
-    <header class="label">
-      <span>Object study / 01</span>
-      <strong>Google</strong>
-    </header>
+    <header class="label"><strong>Google</strong></header>
 
-    <p class="hint"><span>Click the object</span><small>Drag to rotate</small></p>
+    <p class="hint">Click to apply heat</p>
 
     <div class="loader" id="loader">
       <div class="loader__mark">G</div>
       <div class="loader__line"><span></span></div>
-      <p>Loading object</p>
     </div>
 
+    <div class="cursor" id="cursor" aria-hidden="true">
+      <span class="cursor__ring"></span>
+      <span class="cursor__dot"></span>
+    </div>
   </main>
 `
 
 const stage = document.querySelector('#stage')
 const loaderElement = document.querySelector('#loader')
+const cursorElement = document.querySelector('#cursor')
+const cursorRing = cursorElement.querySelector('.cursor__ring')
+const cursorDot = cursorElement.querySelector('.cursor__dot')
 
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(0x040914)
-scene.fog = new THREE.FogExp2(0x0b2b4f, 0.065)
+scene.background = new THREE.Color(0x06070a)
+scene.fog = new THREE.FogExp2(0x08090c, 0.045)
 
-const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.02, 100)
+const camera = new THREE.PerspectiveCamera(34, window.innerWidth / window.innerHeight, 0.02, 120)
 camera.position.set(5, 3.2, 7)
 
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
   powerPreference: 'high-performance',
 })
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-renderer.setSize(window.innerWidth, window.innerHeight)
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+renderer.setSize(window.innerWidth, window.innerHeight, false)
 renderer.outputColorSpace = THREE.SRGBColorSpace
 renderer.toneMapping = THREE.ACESFilmicToneMapping
-renderer.toneMappingExposure = 0.8
+renderer.toneMappingExposure = 0.86
 renderer.shadowMap.enabled = true
-renderer.shadowMap.type = THREE.PCFShadowMap
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
 stage.appendChild(renderer.domElement)
-
-const composer = new EffectComposer(renderer)
-composer.addPass(new RenderPass(scene, camera))
-const bloom = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.08,
-  0.45,
-  0.78,
-)
-composer.addPass(bloom)
 
 const controls = new OrbitControls(camera, renderer.domElement)
 controls.enableDamping = true
@@ -69,95 +62,294 @@ controls.dampingFactor = 0.07
 controls.enablePan = false
 controls.rotateSpeed = 0.55
 controls.zoomSpeed = 0.7
-controls.minPolarAngle = THREE.MathUtils.degToRad(40)
+controls.minPolarAngle = THREE.MathUtils.degToRad(42)
 controls.maxPolarAngle = THREE.MathUtils.degToRad(84)
 
 const params = {
+  palette: 'Ironbow',
+  irVision: false,
+  surfaceLock: false,
+  intensity: 1.35,
+  spread: 0.95,
+  diffusion: 1.5,
+  dwell: 3.6,
+  bleed: 0.35,
+  turbulence: 0.07,
+  swell: 0.014,
+  glow: 1,
+  embers: true,
+  haze: 0.55,
+  vignette: 0.3,
+  bloom: 0.22,
+  exposure: 0.86,
   autoRotate: true,
-  rotationSpeed: 0.35,
-  effectStyle: 'Grid',
-  surfaceLock: true,
-  googleColors: true,
-  fragments: true,
-  gridSize: 0.055,
-  lineWidth: 0.72,
-  spread: 0.92,
-  duration: 1.75,
-  glow: 0.88,
-  displacement: 0.018,
-  lineColor: '#4285f4',
-  waveColor: '#7a5cff',
-  bloom: 0.08,
-  exposure: 0.8,
+  rotationSpeed: 0.3,
   trigger: () => triggerRandomPulse(),
   resetCamera: () => resetCamera(),
 }
 
-// Procedural night sky: atmospheric blue gradient with two layers of tiny stars.
-const skyUniforms = {
+// ---------------------------------------------------------------------------
+// Shared heat field. Every click injects a source that diffuses outward across
+// the surface and cools exponentially, the way a hot spot reads on an IR camera.
+// ---------------------------------------------------------------------------
+
+const heatUniforms = {
+  uSources: { value: Array.from({ length: MAX_SOURCES }, () => new THREE.Vector3(999, 999, 999)) },
+  uAges: { value: new Float32Array(MAX_SOURCES).fill(-1) },
+  uMeshIds: { value: new Float32Array(MAX_SOURCES).fill(-1) },
+  uSurfaceLock: { value: 0 },
+  uSpread: { value: params.spread },
+  uDiffusion: { value: params.diffusion },
+  uCooling: { value: 4.2 / params.dwell },
+  uIntensity: { value: params.intensity },
+  uBleed: { value: params.bleed },
+  uTurbulence: { value: params.turbulence },
+  uSwell: { value: params.swell },
+  uGlow: { value: params.glow },
+  uPalette: { value: 0 },
+  uIrVision: { value: 0 },
   uTime: { value: 0 },
-  uStarBrightness: { value: 0.76 },
 }
-const nightSky = new THREE.Mesh(
-  new THREE.SphereGeometry(68, 64, 40),
+
+const heatFieldChunk = `
+  #define MAX_SOURCES ${MAX_SOURCES}
+
+  uniform vec3 uSources[MAX_SOURCES];
+  uniform float uAges[MAX_SOURCES];
+  uniform float uMeshIds[MAX_SOURCES];
+  uniform float uCurrentMeshId;
+  uniform float uSurfaceLock;
+  uniform float uSpread;
+  uniform float uDiffusion;
+  uniform float uCooling;
+  uniform float uIntensity;
+  uniform float uBleed;
+
+  float heatField(vec3 samplePosition) {
+    float heat = 0.0;
+
+    for (int i = 0; i < MAX_SOURCES; i++) {
+      float age = uAges[i];
+      if (age < 0.0) continue;
+      if (uSurfaceLock > 0.5 && abs(uMeshIds[i] - uCurrentMeshId) > 0.25) continue;
+
+      float growth = 1.0 - exp(-age * uDiffusion);
+      float frontRadius = uSpread * growth;
+      float distanceToSource = distance(samplePosition, uSources[i]);
+
+      // The contact point stays the hottest and spreads only a little.
+      float coreSigma = 0.055 + frontRadius * 0.22;
+      float core = exp(-(distanceToSource * distanceToSource) / (2.0 * coreSigma * coreSigma));
+      core *= 1.0 - 0.25 * growth;
+
+      // The conduction front, travelling outward across the surface.
+      float frontWidth = 0.042 + uBleed * 0.14 + frontRadius * 0.16;
+      float ringDistance = (distanceToSource - frontRadius) / frontWidth;
+      float front = exp(-ringDistance * ringDistance) * exp(-age * 1.35) * 1.05;
+
+      // Everything the front has already crossed is left warm.
+      float interior = 1.0 - smoothstep(frontRadius * 0.55, frontRadius + frontWidth, distanceToSource);
+      interior *= 0.38 * (1.0 - 0.35 * growth);
+
+      heat += (core + front + interior) * exp(-age * uCooling);
+    }
+
+    return heat * uIntensity;
+  }
+`
+
+const noiseChunk = `
+  float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+  }
+
+  float valueNoise(vec3 p) {
+    vec3 cell = floor(p);
+    vec3 offset = fract(p);
+    offset = offset * offset * (3.0 - 2.0 * offset);
+
+    float n000 = hash13(cell);
+    float n100 = hash13(cell + vec3(1.0, 0.0, 0.0));
+    float n010 = hash13(cell + vec3(0.0, 1.0, 0.0));
+    float n110 = hash13(cell + vec3(1.0, 1.0, 0.0));
+    float n001 = hash13(cell + vec3(0.0, 0.0, 1.0));
+    float n101 = hash13(cell + vec3(1.0, 0.0, 1.0));
+    float n011 = hash13(cell + vec3(0.0, 1.0, 1.0));
+    float n111 = hash13(cell + vec3(1.0, 1.0, 1.0));
+
+    return mix(
+      mix(mix(n000, n100, offset.x), mix(n010, n110, offset.x), offset.y),
+      mix(mix(n001, n101, offset.x), mix(n011, n111, offset.x), offset.y),
+      offset.z
+    );
+  }
+`
+
+const paletteChunk = `
+  vec3 ironbow(float t) {
+    vec3 color = vec3(0.026, 0.012, 0.072);
+    color = mix(color, vec3(0.190, 0.038, 0.330), smoothstep(0.00, 0.14, t));
+    color = mix(color, vec3(0.560, 0.070, 0.420), smoothstep(0.12, 0.28, t));
+    color = mix(color, vec3(0.880, 0.160, 0.240), smoothstep(0.24, 0.44, t));
+    color = mix(color, vec3(0.970, 0.380, 0.060), smoothstep(0.40, 0.60, t));
+    color = mix(color, vec3(1.000, 0.660, 0.060), smoothstep(0.56, 0.76, t));
+    color = mix(color, vec3(1.000, 0.900, 0.520), smoothstep(0.74, 0.90, t));
+    color = mix(color, vec3(1.000, 1.000, 0.980), smoothstep(0.88, 1.00, t));
+    return color;
+  }
+
+  vec3 arctic(float t) {
+    vec3 color = vec3(0.020, 0.040, 0.110);
+    color = mix(color, vec3(0.090, 0.210, 0.520), smoothstep(0.00, 0.28, t));
+    color = mix(color, vec3(0.180, 0.560, 0.840), smoothstep(0.24, 0.52, t));
+    color = mix(color, vec3(0.620, 0.880, 0.960), smoothstep(0.48, 0.72, t));
+    color = mix(color, vec3(1.000, 0.760, 0.420), smoothstep(0.70, 0.88, t));
+    color = mix(color, vec3(1.000, 1.000, 0.980), smoothstep(0.86, 1.00, t));
+    return color;
+  }
+
+  vec3 medical(float t) {
+    vec3 color = vec3(0.020, 0.020, 0.090);
+    color = mix(color, vec3(0.070, 0.120, 0.620), smoothstep(0.00, 0.22, t));
+    color = mix(color, vec3(0.060, 0.640, 0.560), smoothstep(0.18, 0.42, t));
+    color = mix(color, vec3(0.520, 0.820, 0.180), smoothstep(0.38, 0.58, t));
+    color = mix(color, vec3(0.980, 0.780, 0.100), smoothstep(0.54, 0.74, t));
+    color = mix(color, vec3(0.940, 0.220, 0.140), smoothstep(0.70, 0.88, t));
+    color = mix(color, vec3(1.000, 1.000, 1.000), smoothstep(0.88, 1.00, t));
+    return color;
+  }
+
+  vec3 thermalPalette(float t, float mode) {
+    t = clamp(t, 0.0, 1.0);
+    if (mode < 0.5) return ironbow(t);
+    if (mode < 1.5) return vec3(pow(t, 0.82));
+    if (mode < 2.5) return vec3(1.0 - pow(t, 0.82));
+    if (mode < 3.5) return arctic(t);
+    return medical(t);
+  }
+`
+
+const thermalShellMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    ...heatUniforms,
+    uCurrentMeshId: { value: -1 },
+  },
+  vertexShader: `
+    ${heatFieldChunk}
+
+    uniform float uSwell;
+    varying vec3 vWorldPosition;
+    varying vec3 vWorldNormal;
+
+    void main() {
+      vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+      vec3 worldNormal = normalize(mat3(modelMatrix) * normal);
+
+      float heat = min(heatField(worldPosition.xyz), 2.4);
+      worldPosition.xyz += worldNormal * heat * uSwell;
+
+      vWorldPosition = worldPosition.xyz;
+      vWorldNormal = worldNormal;
+      gl_Position = projectionMatrix * viewMatrix * worldPosition;
+    }
+  `,
+  fragmentShader: `
+    ${heatFieldChunk}
+    ${noiseChunk}
+    ${paletteChunk}
+
+    uniform float uTurbulence;
+    uniform float uGlow;
+    uniform float uPalette;
+    uniform float uIrVision;
+    uniform float uTime;
+    varying vec3 vWorldPosition;
+    varying vec3 vWorldNormal;
+
+    void main() {
+      vec3 normal = normalize(vWorldNormal);
+      vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
+      float fresnel = pow(1.0 - clamp(abs(dot(normal, viewDirection)), 0.0, 1.0), 2.4);
+
+      // Reject cold fragments before paying for the noise below.
+      if (uIrVision < 0.5 && heatField(vWorldPosition) < 0.004) discard;
+
+      // Convecting plume warp, so the heat edge breathes instead of staying a circle.
+      vec3 warp = vec3(
+        valueNoise(vWorldPosition * 7.5 + vec3(0.0, uTime * 0.26, 0.0)),
+        valueNoise(vWorldPosition * 7.5 + vec3(11.3, uTime * 0.22, 4.7)),
+        valueNoise(vWorldPosition * 7.5 + vec3(3.1, uTime * 0.19, 19.4))
+      ) - 0.5;
+
+      float heat = heatField(vWorldPosition + warp * uTurbulence);
+
+      // Thermal blooming: grazing angles read hotter on a real sensor.
+      heat += heat * fresnel * 0.45;
+      heat += uIrVision * (0.030 + 0.060 * fresnel);
+
+      // Soft knee, so the palette spends its range on the gradient instead of
+      // saturating to white the instant a click lands.
+      float temperature = 1.0 - exp(-heat * 2.8);
+
+      vec3 color = thermalPalette(temperature, uPalette);
+      color *= 1.0 + smoothstep(0.78, 1.0, temperature) * 1.1 * uGlow;
+
+      float alpha = uIrVision > 0.5 ? 1.0 : smoothstep(0.03, 0.24, temperature);
+      if (alpha < 0.004) discard;
+
+      gl_FragColor = vec4(color, alpha);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  depthTest: true,
+  side: THREE.DoubleSide,
+  polygonOffset: true,
+  polygonOffsetFactor: -2,
+  polygonOffsetUnits: -2,
+  toneMapped: false,
+})
+
+// ---------------------------------------------------------------------------
+// Environment: a quiet graphite studio, so heat is the only colour on screen.
+// ---------------------------------------------------------------------------
+
+const skyUniforms = { uTime: { value: 0 } }
+const backdrop = new THREE.Mesh(
+  new THREE.SphereGeometry(72, 48, 32),
   new THREE.ShaderMaterial({
     uniforms: skyUniforms,
     vertexShader: `
-      varying vec3 vSkyDirection;
-
+      varying vec3 vDirection;
       void main() {
-        vSkyDirection = normalize(position);
+        vDirection = normalize(position);
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: `
-      uniform float uTime;
-      uniform float uStarBrightness;
-      varying vec3 vSkyDirection;
+      varying vec3 vDirection;
 
-      const float PI = 3.14159265359;
-
-      float hash21(vec2 value) {
-        value = fract(value * vec2(123.34, 456.21));
-        value += dot(value, value + 45.32);
-        return fract(value.x * value.y);
-      }
-
-      float starLayer(vec2 uv, vec2 resolution, float threshold, float timeScale) {
-        vec2 cellPosition = uv * resolution;
-        vec2 cellId = floor(cellPosition);
-        vec2 cellUv = fract(cellPosition) - 0.5;
-        float randomValue = hash21(cellId);
-        float exists = smoothstep(threshold, 1.0, randomValue);
-        float radius = mix(0.03, 0.09, hash21(cellId + 17.7));
-        float point = 1.0 - smoothstep(radius, radius + 0.035, length(cellUv));
-        float twinkle = 0.76 + 0.24 * sin(uTime * timeScale + randomValue * 37.0);
-        return exists * point * twinkle;
+      float dither(vec2 fragment) {
+        return fract(sin(dot(fragment, vec2(12.9898, 78.233))) * 43758.5453);
       }
 
       void main() {
-        vec3 direction = normalize(vSkyDirection);
+        vec3 direction = normalize(vDirection);
         float height = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-        float upperSky = smoothstep(0.5, 0.86, height);
-        vec3 horizonColor = vec3(0.025, 0.067, 0.14);
-        vec3 zenithColor = vec3(0.002, 0.007, 0.026);
-        vec3 skyColor = mix(horizonColor, zenithColor, upperSky);
 
-        float horizonHaze = exp(-abs(direction.y) * 6.5);
-        skyColor += vec3(0.025, 0.075, 0.16) * horizonHaze * 0.42;
+        vec3 zenith = vec3(0.0035, 0.0040, 0.0055);
+        vec3 horizon = vec3(0.0210, 0.0235, 0.0300);
+        vec3 color = mix(horizon, zenith, smoothstep(0.40, 0.96, height));
 
-        vec2 sphericalUv = vec2(
-          atan(direction.z, direction.x) / (2.0 * PI) + 0.5,
-          asin(clamp(direction.y, -1.0, 1.0)) / PI + 0.5
-        );
+        float floorBounce = exp(-max(direction.y + 0.04, 0.0) * 11.0);
+        color += vec3(0.020, 0.014, 0.010) * floorBounce * 0.5;
 
-        float fineStars = starLayer(sphericalUv, vec2(620.0, 310.0), 0.982, 0.52);
-        float softStars = starLayer(sphericalUv + vec2(0.137, 0.071), vec2(310.0, 155.0), 0.991, 0.28);
-        float aboveHorizon = smoothstep(0.48, 0.58, height);
-        float stars = (fineStars + softStars * 0.58) * aboveHorizon * uStarBrightness;
-        vec3 starColor = mix(vec3(0.48, 0.67, 1.0), vec3(0.96, 0.98, 1.0), fineStars);
+        // Break up banding, which is what makes a dark backdrop look cheap.
+        color += (dither(gl_FragCoord.xy) - 0.5) * 0.0035;
 
-        gl_FragColor = vec4(skyColor + starColor * stars, 1.0);
+        gl_FragColor = vec4(color, 1.0);
       }
     `,
     side: THREE.BackSide,
@@ -166,23 +358,27 @@ const nightSky = new THREE.Mesh(
     toneMapped: false,
   }),
 )
-nightSky.renderOrder = -100
-scene.add(nightSky)
+backdrop.renderOrder = -100
+scene.add(backdrop)
 
-// A quiet studio floor with a soft contact shadow.
+const groundHeatUniforms = {
+  uHeatOrigin: { value: new THREE.Vector3(0, 0, 0) },
+  uHeatAmount: { value: 0 },
+}
+
 const groundMaterial = new THREE.MeshStandardMaterial({
-  color: 0x0b1423,
-  roughness: 0.92,
-  metalness: 0,
+  color: 0x090a0e,
+  roughness: 0.9,
+  metalness: 0.06,
   transparent: true,
   depthWrite: false,
 })
 groundMaterial.onBeforeCompile = (shader) => {
+  shader.uniforms.uHeatOrigin = groundHeatUniforms.uHeatOrigin
+  shader.uniforms.uHeatAmount = groundHeatUniforms.uHeatAmount
+
   shader.vertexShader = shader.vertexShader
-    .replace(
-      '#include <common>',
-      '#include <common>\nvarying vec3 vGroundWorldPosition;',
-    )
+    .replace('#include <common>', '#include <common>\nvarying vec3 vGroundWorldPosition;')
     .replace(
       '#include <begin_vertex>',
       '#include <begin_vertex>\nvGroundWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;',
@@ -191,17 +387,28 @@ groundMaterial.onBeforeCompile = (shader) => {
   shader.fragmentShader = shader.fragmentShader
     .replace(
       '#include <common>',
-      '#include <common>\nvarying vec3 vGroundWorldPosition;',
+      `#include <common>
+      varying vec3 vGroundWorldPosition;
+      uniform vec3 uHeatOrigin;
+      uniform float uHeatAmount;`,
     )
     .replace(
       '#include <opaque_fragment>',
-      `float groundFade = 1.0 - smoothstep(9.0, 31.0, length(vGroundWorldPosition.xz));
+      `float groundFade = 1.0 - smoothstep(6.5, 21.0, length(vGroundWorldPosition.xz));
       diffuseColor.a *= groundFade;
+
+      float pool = exp(-dot(vGroundWorldPosition.xz, vGroundWorldPosition.xz) / 26.0);
+      outgoingLight += vec3(0.052, 0.058, 0.072) * pool * 0.5;
+
+      float heatDistance = distance(vGroundWorldPosition, uHeatOrigin);
+      float heatPool = exp(-(heatDistance * heatDistance) / 0.7) * uHeatAmount;
+      outgoingLight += vec3(1.0, 0.42, 0.14) * heatPool * 0.14 * groundFade;
       #include <opaque_fragment>`,
     )
 }
-groundMaterial.customProgramCacheKey = () => 'soft-radial-ground-v1'
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), groundMaterial)
+groundMaterial.customProgramCacheKey = () => 'thermal-studio-ground-v1'
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(56, 56), groundMaterial)
 ground.rotation.x = -Math.PI / 2
 ground.position.y = -0.015
 ground.receiveShadow = true
@@ -212,10 +419,10 @@ function createContactShadowTexture() {
   canvas.width = 256
   canvas.height = 256
   const context = canvas.getContext('2d')
-  const gradient = context.createRadialGradient(128, 128, 5, 128, 128, 126)
-  gradient.addColorStop(0, 'rgba(31, 42, 56, 0.28)')
-  gradient.addColorStop(0.42, 'rgba(31, 42, 56, 0.12)')
-  gradient.addColorStop(1, 'rgba(31, 42, 56, 0)')
+  const gradient = context.createRadialGradient(128, 128, 4, 128, 128, 126)
+  gradient.addColorStop(0, 'rgba(0, 0, 0, 0.55)')
+  gradient.addColorStop(0.38, 'rgba(0, 0, 0, 0.24)')
+  gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
   context.fillStyle = gradient
   context.fillRect(0, 0, 256, 256)
   const texture = new THREE.CanvasTexture(canvas)
@@ -224,31 +431,22 @@ function createContactShadowTexture() {
 }
 
 const contactShadow = new THREE.Mesh(
-  new THREE.PlaneGeometry(4.8, 3.6),
+  new THREE.PlaneGeometry(5.2, 4),
   new THREE.MeshBasicMaterial({
     map: createContactShadowTexture(),
     transparent: true,
-    opacity: 0.72,
+    opacity: 0.7,
     depthWrite: false,
     toneMapped: false,
   }),
 )
 contactShadow.rotation.x = -Math.PI / 2
-contactShadow.position.y = 0.012
+contactShadow.position.y = 0.01
 scene.add(contactShadow)
 
-const horizonRing = new THREE.Mesh(
-  new THREE.RingGeometry(3.7, 3.71, 160),
-  new THREE.MeshBasicMaterial({ color: 0x36577d, transparent: true, opacity: 0.3, side: THREE.DoubleSide }),
-)
-horizonRing.rotation.x = -Math.PI / 2
-horizonRing.position.y = 0.004
-scene.add(horizonRing)
+scene.add(new THREE.HemisphereLight(0xdde6f4, 0x0a0b0f, 0.85))
 
-// Soft studio lighting.
-scene.add(new THREE.HemisphereLight(0xc8dcff, 0x07101d, 1.0))
-
-const keyLight = new THREE.DirectionalLight(0xffffff, 2.1)
+const keyLight = new THREE.DirectionalLight(0xffffff, 2.3)
 keyLight.position.set(-4, 7, 5)
 keyLight.castShadow = true
 keyLight.shadow.mapSize.set(2048, 2048)
@@ -259,314 +457,349 @@ keyLight.shadow.camera.bottom = -5
 keyLight.shadow.bias = -0.00045
 scene.add(keyLight)
 
-const coolFill = new THREE.PointLight(0x8bbaff, 3.3, 15, 1.6)
+const coolFill = new THREE.PointLight(0xa8c4e8, 2.4, 16, 1.7)
 coolFill.position.set(5, 3.5, 2)
 scene.add(coolFill)
 
-const warmRim = new THREE.PointLight(0x8d72ff, 2.3, 13, 1.7)
-warmRim.position.set(-4, 2.4, -4)
-scene.add(warmRim)
+const rimLight = new THREE.PointLight(0xbfcbdd, 1.5, 14, 1.8)
+rimLight.position.set(-4, 2.4, -4)
+scene.add(rimLight)
 
-// Fine, world-aligned square wire grid revealed only by a pulse.
-const pulseUniforms = {
-  uPoints: { value: Array.from({ length: MAX_PULSES }, () => new THREE.Vector3(999, 999, 999)) },
-  uTimes: { value: new Float32Array(MAX_PULSES).fill(-1) },
-  uMeshIds: { value: new Float32Array(MAX_PULSES).fill(-1) },
-  uGridSize: { value: params.gridSize },
-  uLineWidth: { value: params.lineWidth },
-  uRadius: { value: params.spread },
-  uGlow: { value: params.glow },
-  uDisplacement: { value: params.displacement },
-  uStyle: { value: 0 },
-  uSurfaceLock: { value: 1 },
-  uGoogleColors: { value: 1 },
-  uGlobalTime: { value: 0 },
-  uLineColor: { value: new THREE.Color(params.lineColor) },
-  uWaveColor: { value: new THREE.Color(params.waveColor) },
-}
+// Real light spill from whatever was just heated.
+const heatLight = new THREE.PointLight(0xff6a1e, 0, 2.6, 2)
+heatLight.position.set(0, 1, 0)
+scene.add(heatLight)
 
-const gridEffectMaterial = new THREE.ShaderMaterial({
+// ---------------------------------------------------------------------------
+// Post processing: bloom for the white-hot core, then a single output pass that
+// adds rising heat haze and a vignette before tone mapping and encoding. Folding
+// the output stage in here saves a full-screen read/write of the HDR buffer.
+// ---------------------------------------------------------------------------
+
+const composer = new EffectComposer(renderer)
+composer.addPass(new RenderPass(scene, camera))
+
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth * 0.5, window.innerHeight * 0.5),
+  params.bloom,
+  0.68,
+  0.92,
+)
+composer.addPass(bloom)
+
+const sensorPass = new ShaderPass({
   uniforms: {
-    ...pulseUniforms,
-    uCurrentMeshId: { value: -1 },
+    tDiffuse: { value: null },
+    uCenters: { value: Array.from({ length: MAX_SOURCES }, () => new THREE.Vector4(0, 0, 0, 0)) },
+    uTime: { value: 0 },
+    uAspect: { value: window.innerWidth / window.innerHeight },
+    uHaze: { value: params.haze },
+    uHazeActive: { value: 0 },
+    uVignette: { value: params.vignette },
+    uExposure: { value: params.exposure },
   },
   vertexShader: `
-    #define MAX_PULSES ${MAX_PULSES}
-
-    uniform vec3 uPoints[MAX_PULSES];
-    uniform float uTimes[MAX_PULSES];
-    uniform float uMeshIds[MAX_PULSES];
-    uniform float uCurrentMeshId;
-    uniform float uRadius;
-    uniform float uDisplacement;
-    uniform float uSurfaceLock;
-    varying vec3 vWorldPosition;
-    varying vec3 vWorldNormal;
-
+    varying vec2 vUv;
     void main() {
-      vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-      vec3 worldNormal = normalize(mat3(modelMatrix) * normal);
-      float surfaceLift = 0.0;
-
-      for (int i = 0; i < MAX_PULSES; i++) {
-        float t = uTimes[i];
-        if (t < 0.0 || t > 1.0) continue;
-        if (uSurfaceLock > 0.5 && abs(uMeshIds[i] - uCurrentMeshId) > 0.25) continue;
-
-        float eased = t * t * (3.0 - 2.0 * t);
-        float radius = mix(0.015, uRadius, eased);
-        float distanceFromClick = distance(worldPosition.xyz, uPoints[i]);
-        float wave = 1.0 - smoothstep(0.015, 0.115, abs(distanceFromClick - radius));
-        float life = smoothstep(0.0, 0.06, t) * (1.0 - smoothstep(0.76, 1.0, t));
-        surfaceLift += wave * life * uDisplacement;
-      }
-
-      worldPosition.xyz += worldNormal * surfaceLift;
-      vWorldPosition = worldPosition.xyz;
-      vWorldNormal = worldNormal;
-      gl_Position = projectionMatrix * viewMatrix * worldPosition;
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }
   `,
   fragmentShader: `
-    #define MAX_PULSES ${MAX_PULSES}
+    #define MAX_SOURCES ${MAX_SOURCES}
 
-    uniform vec3 uPoints[MAX_PULSES];
-    uniform float uTimes[MAX_PULSES];
-    uniform float uMeshIds[MAX_PULSES];
-    uniform float uCurrentMeshId;
-    uniform float uGridSize;
-    uniform float uLineWidth;
-    uniform float uRadius;
-    uniform float uGlow;
-    uniform float uStyle;
-    uniform float uSurfaceLock;
-    uniform float uGoogleColors;
-    uniform float uGlobalTime;
-    uniform vec3 uLineColor;
-    uniform vec3 uWaveColor;
-    varying vec3 vWorldPosition;
-    varying vec3 vWorldNormal;
+    uniform sampler2D tDiffuse;
+    uniform vec4 uCenters[MAX_SOURCES];
+    uniform float uTime;
+    uniform float uAspect;
+    uniform float uHaze;
+    uniform float uHazeActive;
+    uniform float uVignette;
+    uniform float uExposure;
+    varying vec2 vUv;
 
-    float squareGrid(vec3 worldPosition, vec3 worldNormal) {
-      vec3 coordinate = worldPosition / max(uGridSize, 0.008);
-      vec3 cellEdge = min(fract(coordinate), 1.0 - fract(coordinate));
-      vec3 antialiasWidth = fwidth(coordinate) * uLineWidth;
-      vec3 line = 1.0 - smoothstep(vec3(0.0), antialiasWidth, cellEdge);
-      vec3 normalWeight = abs(normalize(worldNormal));
-
-      if (normalWeight.x > normalWeight.y && normalWeight.x > normalWeight.z) {
-        return max(line.y, line.z);
-      }
-      if (normalWeight.y > normalWeight.z) {
-        return max(line.x, line.z);
-      }
-      return max(line.x, line.y);
+    // Matches THREE.ACESFilmicToneMapping so the look is unchanged by the merge.
+    vec3 rrtAndOdtFit(vec3 v) {
+      vec3 a = v * (v + 0.0245786) - 0.000090537;
+      vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+      return a / b;
     }
 
-    vec3 googlePalette(float phase) {
-      vec3 blue = vec3(0.259, 0.522, 0.957);
-      vec3 red = vec3(0.918, 0.263, 0.208);
-      vec3 yellow = vec3(0.984, 0.737, 0.020);
-      vec3 green = vec3(0.204, 0.659, 0.325);
+    vec3 acesFilmic(vec3 color) {
+      const mat3 inputMatrix = mat3(
+        0.59719, 0.07600, 0.02840,
+        0.35458, 0.90834, 0.13383,
+        0.04823, 0.01566, 0.83777
+      );
+      const mat3 outputMatrix = mat3(
+         1.60475, -0.10208, -0.00327,
+        -0.53108,  1.10813, -0.07276,
+        -0.07367, -0.00605,  1.07602
+      );
+      color *= uExposure / 0.6;
+      color = outputMatrix * rrtAndOdtFit(inputMatrix * color);
+      return clamp(color, 0.0, 1.0);
+    }
 
-      if (phase < 0.33) return mix(blue, red, phase / 0.33);
-      if (phase < 0.66) return mix(red, yellow, (phase - 0.33) / 0.33);
-      return mix(yellow, green, (phase - 0.66) / 0.34);
+    vec3 linearToSRGB(vec3 value) {
+      return mix(
+        pow(value, vec3(0.41666)) * 1.055 - vec3(0.055),
+        value * 12.92,
+        vec3(lessThanEqual(value, vec3(0.0031308)))
+      );
     }
 
     void main() {
-      float grid = squareGrid(vWorldPosition, vWorldNormal);
-      float alpha = 0.0;
-      vec3 finalColor = vec3(0.0);
+      vec2 offset = vec2(0.0);
 
-      for (int i = 0; i < MAX_PULSES; i++) {
-        float t = uTimes[i];
-        if (t < 0.0 || t > 1.0) continue;
-        if (uSurfaceLock > 0.5 && abs(uMeshIds[i] - uCurrentMeshId) > 0.25) continue;
+      if (uHazeActive > 0.5) {
+      // Independent of the sources, so it is computed once rather than per source.
+      float sway = sin(vUv.x * 36.0 + uTime * 2.1) * 0.3;
 
-        float eased = t * t * (3.0 - 2.0 * t);
-        float radius = mix(0.015, uRadius, eased);
-        float distanceFromClick = distance(vWorldPosition, uPoints[i]);
-        float leadingLine = 1.0 - smoothstep(0.012, 0.058, abs(distanceFromClick - radius));
-        float wave = 1.0 - smoothstep(0.025, 0.15, abs(distanceFromClick - radius));
-        float interior = 1.0 - smoothstep(radius - 0.025, radius + 0.04, distanceFromClick);
-        float distanceBehindFront = max(radius - distanceFromClick, 0.0);
-        float trailDistanceFade = 1.0 - smoothstep(0.12, max(uRadius * 0.82, 0.13), distanceBehindFront);
-        float reveal = interior * trailDistanceFade * (1.0 - smoothstep(0.28, 0.94, t));
-        float life = smoothstep(0.0, 0.055, t) * (1.0 - smoothstep(0.78, 1.0, t));
-        float facing = 0.65 + 0.35 * abs(dot(normalize(vWorldNormal), normalize(cameraPosition - vWorldPosition)));
+      for (int i = 0; i < MAX_SOURCES; i++) {
+        vec4 center = uCenters[i];
+        if (center.w <= 0.002) continue;
 
-        float radarCoordinate = distanceFromClick / max(uGridSize * 1.75, 0.012);
-        float radar = 1.0 - smoothstep(0.055, 0.13, abs(fract(radarCoordinate) - 0.5));
-        float scanCoordinate = vWorldPosition.y / max(uGridSize * 0.78, 0.01);
-        float dataScan = 1.0 - smoothstep(0.06, 0.15, abs(fract(scanCoordinate) - 0.5));
-        float hologramScan = 0.5 + 0.5 * sin(vWorldPosition.y * 95.0 - uGlobalTime * 5.5);
+        vec2 delta = (vUv - center.xy) * vec2(uAspect, 1.0);
+        float distanceToCenter = length(delta);
+        float radius = max(center.z, 0.012);
 
-        float pattern = grid;
-        if (uStyle > 0.5 && uStyle < 1.5) pattern = max(radar, grid * 0.22);
-        if (uStyle > 1.5 && uStyle < 2.5) pattern = max(dataScan, grid * 0.36);
-        if (uStyle > 2.5) pattern = max(grid * 0.72, dataScan * hologramScan);
+        // Beyond three radii the shimmer is under a tenth of a pixel; skip the
+        // transcendentals rather than pay for them across the whole frame.
+        if (distanceToCenter > radius * 3.0) continue;
 
-        float strength = pattern * (leadingLine * 1.72 + wave * 0.52 + reveal * 0.32) * life * facing;
-        float colorPhase = clamp(t * 0.82 + distanceFromClick / max(uRadius, 0.01) * 0.18, 0.0, 1.0);
-        vec3 customColor = mix(uLineColor, uWaveColor, smoothstep(0.0, 1.0, colorPhase));
-        vec3 color = uGoogleColors > 0.5 ? googlePalette(colorPhase) : customColor;
-        color = mix(color, vec3(1.0), leadingLine * 0.68);
+        float field = exp(-(distanceToCenter * distanceToCenter) / (radius * radius * 2.2));
+        float rising = smoothstep(-0.35, 1.15, (vUv.y - center.y) / max(radius * 2.4, 0.05));
+        float wobble = sin(distanceToCenter * 44.0 - uTime * 4.2 + center.w * 17.0) * 0.7 + sway;
 
-        finalColor += color * strength * uGlow;
-        alpha = max(alpha, strength);
+        vec2 direction = delta / max(distanceToCenter, 1e-5);
+        offset += direction * wobble * field * center.w * uHaze * 0.006;
+        offset.y += wobble * field * rising * center.w * uHaze * 0.004;
+      }
       }
 
-      if (alpha < 0.012) discard;
-      gl_FragColor = vec4(finalColor, clamp(alpha, 0.0, 0.96));
+      vec3 color = texture2D(tDiffuse, vUv + offset).rgb;
+
+      float vignette = smoothstep(1.15, 0.32, length((vUv - 0.5) * vec2(uAspect, 1.0)));
+      color *= mix(1.0, vignette, uVignette);
+
+      gl_FragColor = vec4(linearToSRGB(acesFilmic(color)), 1.0);
+    }
+  `,
+})
+composer.addPass(sensorPass)
+
+// ---------------------------------------------------------------------------
+// Embers: cooling sparks that convect upward off the heated point.
+// ---------------------------------------------------------------------------
+
+const MAX_EMBERS = 220
+const emberPositions = new Float32Array(MAX_EMBERS * 3).fill(999)
+const emberSizes = new Float32Array(MAX_EMBERS)
+const emberLives = new Float32Array(MAX_EMBERS)
+const emberSeeds = new Float32Array(MAX_EMBERS)
+
+const emberGeometry = new THREE.BufferGeometry()
+emberGeometry.setAttribute('position', new THREE.BufferAttribute(emberPositions, 3).setUsage(THREE.DynamicDrawUsage))
+emberGeometry.setAttribute('aSize', new THREE.BufferAttribute(emberSizes, 1).setUsage(THREE.DynamicDrawUsage))
+emberGeometry.setAttribute('aLife', new THREE.BufferAttribute(emberLives, 1).setUsage(THREE.DynamicDrawUsage))
+emberGeometry.setAttribute('aSeed', new THREE.BufferAttribute(emberSeeds, 1).setUsage(THREE.DynamicDrawUsage))
+
+const emberMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixelRatio: { value: renderer.getPixelRatio() },
+    uPalette: heatUniforms.uPalette,
+  },
+  vertexShader: `
+    attribute float aSize;
+    attribute float aLife;
+    attribute float aSeed;
+    uniform float uPixelRatio;
+    varying float vLife;
+    varying float vSeed;
+
+    void main() {
+      vLife = aLife;
+      vSeed = aSeed;
+      vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = aSize * uPixelRatio * (16.0 / max(-viewPosition.z, 0.001)) * (0.35 + 0.65 * aLife);
+      gl_Position = projectionMatrix * viewPosition;
+    }
+  `,
+  fragmentShader: `
+    ${paletteChunk}
+
+    uniform float uPalette;
+    varying float vLife;
+    varying float vSeed;
+
+    void main() {
+      vec2 coordinate = gl_PointCoord - 0.5;
+      float falloff = smoothstep(0.5, 0.02, length(coordinate));
+      if (falloff < 0.01 || vLife <= 0.0) discard;
+
+      float temperature = clamp(vLife * (0.78 + 0.34 * vSeed), 0.0, 1.0);
+      vec3 color = thermalPalette(temperature, uPalette) * (0.45 + 1.15 * temperature);
+
+      gl_FragColor = vec4(color, falloff * smoothstep(0.0, 0.25, vLife));
     }
   `,
   transparent: true,
   depthWrite: false,
-  depthTest: true,
   blending: THREE.AdditiveBlending,
-  side: THREE.DoubleSide,
-  polygonOffset: true,
-  polygonOffsetFactor: -2,
-  polygonOffsetUnits: -2,
   toneMapped: false,
 })
 
-// Small square fragments released from the click point.
-const MAX_FRAGMENTS = 180
-const fragmentPositions = new Float32Array(MAX_FRAGMENTS * 3)
-const fragmentColors = new Float32Array(MAX_FRAGMENTS * 3)
-fragmentPositions.fill(999)
-const fragmentGeometry = new THREE.BufferGeometry()
-fragmentGeometry.setAttribute('position', new THREE.BufferAttribute(fragmentPositions, 3).setUsage(THREE.DynamicDrawUsage))
-fragmentGeometry.setAttribute('color', new THREE.BufferAttribute(fragmentColors, 3).setUsage(THREE.DynamicDrawUsage))
-const fragmentMaterial = new THREE.PointsMaterial({
-  size: 0.038,
-  vertexColors: true,
-  transparent: true,
-  opacity: 0.92,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  sizeAttenuation: true,
-  toneMapped: false,
-})
-const fragmentCloud = new THREE.Points(fragmentGeometry, fragmentMaterial)
-fragmentCloud.frustumCulled = false
-fragmentCloud.renderOrder = 10
-scene.add(fragmentCloud)
+const emberCloud = new THREE.Points(emberGeometry, emberMaterial)
+emberCloud.frustumCulled = false
+emberCloud.renderOrder = 12
+scene.add(emberCloud)
 
-const fragmentStates = Array.from({ length: MAX_FRAGMENTS }, () => ({
+const emberStates = Array.from({ length: MAX_EMBERS }, () => ({
   active: false,
   age: 0,
   duration: 1,
   velocity: new THREE.Vector3(),
-  baseColor: new THREE.Color(),
 }))
-const fragmentPalette = [0x4285f4, 0xea4335, 0xfbbc05, 0x34a853].map((color) => new THREE.Color(color))
-let nextFragment = 0
+let nextEmber = 0
 
-function spawnFragments(point, normal) {
-  if (!params.fragments) return
+function spawnEmbers(point, normal) {
+  if (!params.embers) return
 
-  for (let count = 0; count < 24; count += 1) {
-    const index = nextFragment % MAX_FRAGMENTS
-    nextFragment += 1
-    const state = fragmentStates[index]
-    const randomDirection = new THREE.Vector3(
+  for (let count = 0; count < 20; count += 1) {
+    const index = nextEmber % MAX_EMBERS
+    nextEmber += 1
+    const state = emberStates[index]
+
+    const scatterDirection = new THREE.Vector3(
       THREE.MathUtils.randFloatSpread(1),
       THREE.MathUtils.randFloatSpread(1),
       THREE.MathUtils.randFloatSpread(1),
     ).normalize()
-    const outward = THREE.MathUtils.randFloat(0.08, 0.26)
-    const scatter = THREE.MathUtils.randFloat(0.05, 0.17)
 
     state.active = true
     state.age = 0
-    state.duration = THREE.MathUtils.randFloat(0.6, 1.15)
-    state.velocity.copy(normal).multiplyScalar(outward).addScaledVector(randomDirection, scatter)
-    state.baseColor.copy(fragmentPalette[count % fragmentPalette.length])
+    state.duration = THREE.MathUtils.randFloat(0.9, 1.9)
+    state.velocity
+      .copy(normal)
+      .multiplyScalar(THREE.MathUtils.randFloat(0.1, 0.3))
+      .addScaledVector(scatterDirection, THREE.MathUtils.randFloat(0.04, 0.14))
 
-    fragmentPositions[index * 3] = point.x + randomDirection.x * 0.025
-    fragmentPositions[index * 3 + 1] = point.y + randomDirection.y * 0.025
-    fragmentPositions[index * 3 + 2] = point.z + randomDirection.z * 0.025
-    fragmentColors[index * 3] = state.baseColor.r
-    fragmentColors[index * 3 + 1] = state.baseColor.g
-    fragmentColors[index * 3 + 2] = state.baseColor.b
+    emberPositions[index * 3] = point.x + scatterDirection.x * 0.022
+    emberPositions[index * 3 + 1] = point.y + scatterDirection.y * 0.022
+    emberPositions[index * 3 + 2] = point.z + scatterDirection.z * 0.022
+    emberSizes[index] = THREE.MathUtils.randFloat(0.9, 2.6)
+    emberLives[index] = 1
+    emberSeeds[index] = Math.random()
   }
 
-  fragmentGeometry.attributes.position.needsUpdate = true
-  fragmentGeometry.attributes.color.needsUpdate = true
+  emberGeometry.attributes.position.needsUpdate = true
+  emberGeometry.attributes.aSize.needsUpdate = true
+  emberGeometry.attributes.aLife.needsUpdate = true
+  emberGeometry.attributes.aSeed.needsUpdate = true
 }
 
-function updateFragments(deltaTime) {
+function updateEmbers(deltaTime, elapsed) {
   let changed = false
 
-  for (let index = 0; index < MAX_FRAGMENTS; index += 1) {
-    const state = fragmentStates[index]
+  for (let index = 0; index < MAX_EMBERS; index += 1) {
+    const state = emberStates[index]
     if (!state.active) continue
     changed = true
+
     state.age += deltaTime
     const life = Math.max(0, 1 - state.age / state.duration)
 
     if (life <= 0) {
       state.active = false
-      fragmentPositions[index * 3] = 999
-      fragmentPositions[index * 3 + 1] = 999
-      fragmentPositions[index * 3 + 2] = 999
+      emberLives[index] = 0
+      emberPositions[index * 3] = 999
+      emberPositions[index * 3 + 1] = 999
+      emberPositions[index * 3 + 2] = 999
       continue
     }
 
-    fragmentPositions[index * 3] += state.velocity.x * deltaTime
-    fragmentPositions[index * 3 + 1] += state.velocity.y * deltaTime
-    fragmentPositions[index * 3 + 2] += state.velocity.z * deltaTime
-    state.velocity.y -= 0.055 * deltaTime
-    fragmentColors[index * 3] = state.baseColor.r * life
-    fragmentColors[index * 3 + 1] = state.baseColor.g * life
-    fragmentColors[index * 3 + 2] = state.baseColor.b * life
+    // Buoyancy plus a slow lateral drift: hot air rises and wanders.
+    state.velocity.y += 0.22 * deltaTime
+    state.velocity.multiplyScalar(1 - 0.9 * deltaTime)
+    const drift = Math.sin(elapsed * 1.6 + emberSeeds[index] * 21.7) * 0.035 * deltaTime
+
+    emberPositions[index * 3] += state.velocity.x * deltaTime + drift
+    emberPositions[index * 3 + 1] += state.velocity.y * deltaTime
+    emberPositions[index * 3 + 2] += state.velocity.z * deltaTime - drift
+    emberLives[index] = life
   }
 
   if (changed) {
-    fragmentGeometry.attributes.position.needsUpdate = true
-    fragmentGeometry.attributes.color.needsUpdate = true
+    emberGeometry.attributes.position.needsUpdate = true
+    emberGeometry.attributes.aLife.needsUpdate = true
   }
 }
 
+// ---------------------------------------------------------------------------
+// Interaction
+// ---------------------------------------------------------------------------
+
 const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
-const clickableMeshes = []
-const pulses = Array.from({ length: MAX_PULSES }, () => ({ start: -100 }))
 const pointerDown = new THREE.Vector2()
+const clickableMeshes = []
+const thermalShells = []
+const heatSources = Array.from({ length: MAX_SOURCES }, () => ({ start: -1000, point: new THREE.Vector3() }))
 const defaultCameraPosition = new THREE.Vector3()
 const defaultTarget = new THREE.Vector3()
-let nextPulse = 0
+const projectedPoint = new THREE.Vector3()
+const pointerPixel = new THREE.Vector2(-200, -200)
+const cursorRingPixel = new THREE.Vector2(-200, -200)
+let nextSource = 0
 let model = null
 let dragging = false
 let pointerPressed = false
+let peakHeat = 0
+let cursorScale = 0.6
+let cursorTargetScale = 0.6
+let shellsVisible = false
+
+// A trailing ring and an exact dot: the ring lags just enough to feel weighted.
+function updateCursor(deltaTime) {
+  cursorRingPixel.lerp(pointerPixel, 1 - Math.exp(-deltaTime * 17))
+  cursorScale += (cursorTargetScale - cursorScale) * (1 - Math.exp(-deltaTime * 15))
+
+  cursorRing.style.transform =
+    `translate3d(${cursorRingPixel.x}px, ${cursorRingPixel.y}px, 0) scale(${cursorScale.toFixed(3)})`
+  cursorDot.style.transform = `translate3d(${pointerPixel.x}px, ${pointerPixel.y}px, 0)`
+}
 
 function getHitWorldNormal(hit) {
   if (!hit.face) return new THREE.Vector3(0, 1, 0)
   return hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize()
 }
 
-function createPulse(point, meshId, normal) {
-  const index = nextPulse % MAX_PULSES
-  nextPulse += 1
-  pulseUniforms.uPoints.value[index].copy(point)
-  pulseUniforms.uMeshIds.value[index] = meshId
-  pulses[index].start = performance.now() * 0.001
-  pulseUniforms.uTimes.value[index] = 0
-  spawnFragments(point, normal)
-  document.body.classList.add('has-interacted')
+function applyHeat(point, meshId, normal, fromPointer = true) {
+  const index = nextSource % MAX_SOURCES
+  nextSource += 1
+
+  heatUniforms.uSources.value[index].copy(point)
+  heatUniforms.uMeshIds.value[index] = meshId
+  heatUniforms.uAges.value[index] = 0
+  heatSources[index].start = performance.now() * 0.001
+  heatSources[index].point.copy(point)
+
+  heatLight.position.copy(point).addScaledVector(normal, 0.4)
+  groundHeatUniforms.uHeatOrigin.value.set(point.x, 0, point.z)
+
+  spawnEmbers(point, normal)
+  if (fromPointer) document.body.classList.add('has-interacted')
 }
 
-function triggerRandomPulse() {
+function triggerRandomPulse(fromPointer = true) {
   if (!model) return
   for (let attempt = 0; attempt < 32; attempt += 1) {
     pointer.set(THREE.MathUtils.randFloat(-0.5, 0.5), THREE.MathUtils.randFloat(-0.36, 0.42))
     raycaster.setFromCamera(pointer, camera)
     const hit = raycaster.intersectObjects(clickableMeshes, false)[0]
     if (hit) {
-      createPulse(hit.point, hit.object.userData.effectMeshId, getHitWorldNormal(hit))
+      applyHeat(hit.point, hit.object.userData.thermalMeshId, getHitWorldNormal(hit), fromPointer)
       return
     }
   }
@@ -574,6 +807,7 @@ function triggerRandomPulse() {
 
 function prepareModel(root) {
   const sourceMeshes = []
+
   root.traverse((object) => {
     if (!object.isMesh) return
 
@@ -592,25 +826,28 @@ function prepareModel(root) {
     const materials = Array.isArray(object.material) ? object.material : [object.material]
     materials.forEach((material) => {
       if (!material) return
-      if ('envMapIntensity' in material) material.envMapIntensity = 0.85
-      if ('roughness' in material) material.roughness = Math.max(material.roughness ?? 0.5, 0.34)
+      if ('envMapIntensity' in material) material.envMapIntensity = 0.8
+      if ('roughness' in material) material.roughness = Math.max(material.roughness ?? 0.5, 0.38)
     })
   })
 
   sourceMeshes.forEach((object, meshId) => {
-    object.userData.effectMeshId = meshId
-    const shellMaterial = gridEffectMaterial.clone()
-    Object.keys(pulseUniforms).forEach((uniformName) => {
-      shellMaterial.uniforms[uniformName] = pulseUniforms[uniformName]
+    object.userData.thermalMeshId = meshId
+
+    const shellMaterial = thermalShellMaterial.clone()
+    Object.keys(heatUniforms).forEach((uniformName) => {
+      shellMaterial.uniforms[uniformName] = heatUniforms[uniformName]
     })
     shellMaterial.uniforms.uCurrentMeshId = { value: meshId }
 
-    const gridShell = new THREE.Mesh(object.geometry, shellMaterial)
-    gridShell.name = `${object.name || 'mesh'}-grid-pulse`
-    gridShell.frustumCulled = false
-    gridShell.renderOrder = 6
-    gridShell.raycast = () => {}
-    object.add(gridShell)
+    const shell = new THREE.Mesh(object.geometry, shellMaterial)
+    shell.name = `${object.name || 'mesh'}-thermal-shell`
+    shell.frustumCulled = false
+    shell.renderOrder = 6
+    shell.raycast = () => {}
+    shell.visible = false
+    thermalShells.push(shell)
+    object.add(shell)
   })
 }
 
@@ -619,7 +856,7 @@ function placeAndFrameModel(root) {
     root.updateMatrixWorld(true)
     const bounds = new THREE.Box3()
     root.traverse((object) => {
-      if (object.isMesh && object.visible && !object.name.endsWith('-grid-pulse')) {
+      if (object.isMesh && object.visible && !object.name.endsWith('-thermal-shell')) {
         bounds.expandByObject(object, true)
       }
     })
@@ -627,8 +864,7 @@ function placeAndFrameModel(root) {
   }
 
   root.updateMatrixWorld(true)
-  const initialBox = getVisibleBounds()
-  const initialSize = initialBox.getSize(new THREE.Vector3())
+  const initialSize = getVisibleBounds().getSize(new THREE.Vector3())
   const scale = 3.7 / Math.max(initialSize.x, initialSize.y, initialSize.z, 0.001)
   root.scale.multiplyScalar(scale)
   root.updateMatrixWorld(true)
@@ -647,6 +883,7 @@ function placeAndFrameModel(root) {
   const halfFov = THREE.MathUtils.degToRad(camera.fov * 0.5)
   const distance = (sphere.radius / Math.sin(halfFov)) * 1.08
   const viewDirection = new THREE.Vector3(0.9, 0.34, 1.45).normalize()
+
   camera.position.copy(target).addScaledVector(viewDirection, distance)
   controls.target.copy(target)
   controls.minDistance = distance * 0.66
@@ -655,11 +892,7 @@ function placeAndFrameModel(root) {
   defaultCameraPosition.copy(camera.position)
   defaultTarget.copy(controls.target)
 
-  contactShadow.scale.set(
-    Math.max(0.75, size.x / 3.7),
-    Math.max(0.75, size.z / 3.7),
-    1,
-  )
+  contactShadow.scale.set(Math.max(0.75, size.x / 3.7), Math.max(0.75, size.z / 3.7), 1)
 }
 
 function resetCamera() {
@@ -678,9 +911,20 @@ gltfLoader.load(
     scene.add(model)
     model.updateMatrixWorld(true)
 
+    // Nothing in the scene casts a moving shadow, so stop re-rendering the shadow
+    // map once the model has been in it for a frame. Freezing it any earlier
+    // leaves the shadow sampler bound to a null texture and the ground plane,
+    // which receives it, fails to draw at all.
+    freezeShadowsIn = 2
+
     loaderElement.style.setProperty('--progress', 1)
     loaderElement.classList.add('is-hidden')
     setTimeout(() => loaderElement.remove(), 850)
+
+    // One unattributed pulse so the effect introduces itself; the hint stays up.
+    setTimeout(() => {
+      if (!document.body.classList.contains('has-interacted')) triggerRandomPulse(false)
+    }, 1500)
   },
   (event) => {
     if (!event.total) return
@@ -688,7 +932,6 @@ gltfLoader.load(
   },
   (error) => {
     console.error('Unable to load /google.glb', error)
-    loaderElement.querySelector('p').textContent = 'Could not load google.glb'
     loaderElement.classList.add('has-error')
   },
 )
@@ -699,10 +942,19 @@ function updatePointer(event) {
   pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
 }
 
+window.addEventListener('pointermove', (event) => {
+  pointerPixel.set(event.clientX, event.clientY)
+  cursorElement.classList.add('is-visible')
+}, { passive: true })
+
+document.addEventListener('pointerleave', () => cursorElement.classList.remove('is-visible'))
+window.addEventListener('blur', () => cursorElement.classList.remove('is-visible'))
+
 renderer.domElement.addEventListener('pointerdown', (event) => {
   pointerDown.set(event.clientX, event.clientY)
   pointerPressed = true
   dragging = false
+  cursorTargetScale = 0.42
   renderer.domElement.classList.add('is-dragging')
 })
 
@@ -714,79 +966,180 @@ renderer.domElement.addEventListener('pointermove', (event) => {
   raycaster.setFromCamera(pointer, camera)
   const overObject = raycaster.intersectObjects(clickableMeshes, false).length > 0
   renderer.domElement.classList.toggle('is-over-object', overObject)
+  cursorElement.classList.toggle('is-over', overObject)
+  if (!pointerPressed) cursorTargetScale = overObject ? 1 : 0.6
 })
 
 renderer.domElement.addEventListener('pointerleave', () => {
   renderer.domElement.classList.remove('is-over-object')
+  cursorElement.classList.remove('is-over')
+  cursorTargetScale = 0.6
 })
 
 renderer.domElement.addEventListener('pointerup', (event) => {
   pointerPressed = false
+  cursorTargetScale = cursorElement.classList.contains('is-over') ? 1 : 0.6
   renderer.domElement.classList.remove('is-dragging')
   if (!model || dragging) return
+
   updatePointer(event)
   raycaster.setFromCamera(pointer, camera)
   const hit = raycaster.intersectObjects(clickableMeshes, false)[0]
-  if (hit) createPulse(hit.point, hit.object.userData.effectMeshId, getHitWorldNormal(hit))
+  if (hit) applyHeat(hit.point, hit.object.userData.thermalMeshId, getHitWorldNormal(hit))
 })
 
 renderer.domElement.addEventListener('pointercancel', () => {
   pointerPressed = false
   dragging = false
+  cursorTargetScale = 0.6
   renderer.domElement.classList.remove('is-dragging')
 })
 
-const gui = new GUI({ title: 'Effect Controls', width: 248 })
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+
+const palettes = { Ironbow: 0, 'White hot': 1, 'Black hot': 2, Arctic: 3, Rainbow: 4 }
+
+const gui = new GUI({ title: 'Thermal controls', width: 252 })
 gui.domElement.classList.add('effect-gui')
-const effectStyles = { Grid: 0, Radar: 1, 'Data Scan': 2, Hologram: 3 }
-gui.add(params, 'effectStyle', Object.keys(effectStyles)).name('Pulse style').onChange((value) => { pulseUniforms.uStyle.value = effectStyles[value] })
-gui.add(params, 'surfaceLock').name('Surface lock').onChange((value) => { pulseUniforms.uSurfaceLock.value = value ? 1 : 0 })
-gui.add(params, 'googleColors').name('Google colors').onChange((value) => { pulseUniforms.uGoogleColors.value = value ? 1 : 0 })
-gui.add(params, 'fragments').name('Grid fragments')
-gui.add(params, 'gridSize', 0.018, 0.14, 0.001).name('Grid size').onChange((value) => { pulseUniforms.uGridSize.value = value })
-gui.add(params, 'lineWidth', 0.4, 2.8, 0.05).name('Line width').onChange((value) => { pulseUniforms.uLineWidth.value = value })
-gui.add(params, 'spread', 0.25, 2.2, 0.01).name('Spread').onChange((value) => { pulseUniforms.uRadius.value = value })
-gui.add(params, 'duration', 0.55, 3, 0.05).name('Duration')
-gui.add(params, 'glow', 0.15, 3, 0.01).name('Glow').onChange((value) => { pulseUniforms.uGlow.value = value })
-gui.add(params, 'displacement', 0, 0.08, 0.001).name('Surface lift').onChange((value) => { pulseUniforms.uDisplacement.value = value })
-gui.addColor(params, 'lineColor').name('Grid color').onChange((value) => { pulseUniforms.uLineColor.value.set(value) })
-gui.addColor(params, 'waveColor').name('Wave color').onChange((value) => { pulseUniforms.uWaveColor.value.set(value) })
-gui.add(params, 'bloom', 0, 1.3, 0.01).name('Bloom').onChange((value) => { bloom.strength = value })
-gui.add(params, 'exposure', 0.65, 1.4, 0.01).name('Exposure').onChange((value) => { renderer.toneMappingExposure = value })
-gui.add(params, 'autoRotate').name('Auto rotate')
-gui.add(params, 'rotationSpeed', 0.05, 1.5, 0.05).name('Rotate speed')
-gui.add(params, 'trigger').name('Trigger grid pulse')
-gui.add(params, 'resetCamera').name('Reset camera')
+gui.domElement.addEventListener('pointerenter', () => cursorElement.classList.add('is-muted'))
+gui.domElement.addEventListener('pointerleave', () => cursorElement.classList.remove('is-muted'))
+
+const heatFolder = gui.addFolder('Heat')
+heatFolder.add(params, 'palette', Object.keys(palettes)).name('Palette').onChange((value) => { heatUniforms.uPalette.value = palettes[value] })
+heatFolder.add(params, 'irVision').name('Full IR vision').onChange((value) => { heatUniforms.uIrVision.value = value ? 1 : 0 })
+heatFolder.add(params, 'intensity', 0.3, 2.6, 0.01).name('Intensity').onChange((value) => { heatUniforms.uIntensity.value = value })
+heatFolder.add(params, 'spread', 0.15, 2.6, 0.01).name('Spread').onChange((value) => { heatUniforms.uSpread.value = value })
+heatFolder.add(params, 'diffusion', 0.4, 6, 0.05).name('Diffusion rate').onChange((value) => { heatUniforms.uDiffusion.value = value })
+heatFolder.add(params, 'dwell', 0.8, 8, 0.1).name('Cool-down (s)').onChange((value) => { heatUniforms.uCooling.value = 4.2 / value })
+heatFolder.add(params, 'bleed', 0, 1, 0.01).name('Edge bleed').onChange((value) => { heatUniforms.uBleed.value = value })
+heatFolder.add(params, 'turbulence', 0, 0.2, 0.005).name('Plume warp').onChange((value) => { heatUniforms.uTurbulence.value = value })
+heatFolder.add(params, 'swell', 0, 0.06, 0.001).name('Thermal swell').onChange((value) => { heatUniforms.uSwell.value = value })
+heatFolder.add(params, 'glow', 0, 3, 0.01).name('Core glow').onChange((value) => { heatUniforms.uGlow.value = value })
+heatFolder.add(params, 'embers').name('Embers')
+heatFolder.add(params, 'surfaceLock').name('Surface lock').onChange((value) => { heatUniforms.uSurfaceLock.value = value ? 1 : 0 })
+
+const sensorFolder = gui.addFolder('Sensor')
+sensorFolder.add(params, 'haze', 0, 2, 0.01).name('Heat haze').onChange((value) => { sensorPass.uniforms.uHaze.value = value })
+sensorFolder.add(params, 'vignette', 0, 1, 0.01).name('Vignette').onChange((value) => { sensorPass.uniforms.uVignette.value = value })
+sensorFolder.add(params, 'bloom', 0, 1.6, 0.01).name('Bloom').onChange((value) => { bloom.strength = value })
+sensorFolder.add(params, 'exposure', 0.6, 1.4, 0.01).name('Exposure').onChange((value) => { sensorPass.uniforms.uExposure.value = value })
+
+const sceneFolder = gui.addFolder('Scene')
+sceneFolder.add(params, 'autoRotate').name('Auto rotate')
+sceneFolder.add(params, 'rotationSpeed', 0.05, 1.5, 0.05).name('Rotate speed')
+sceneFolder.add(params, 'trigger').name('Trigger heat pulse')
+sceneFolder.add(params, 'resetCamera').name('Reset camera')
+
+heatFolder.close()
+sensorFolder.close()
+sceneFolder.close()
 gui.close()
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight
   camera.updateProjectionMatrix()
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-  renderer.setSize(window.innerWidth, window.innerHeight)
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+  renderer.setSize(window.innerWidth, window.innerHeight, false)
   composer.setSize(window.innerWidth, window.innerHeight)
+  bloom.setSize(window.innerWidth * 0.5, window.innerHeight * 0.5)
+  sensorPass.uniforms.uAspect.value = window.innerWidth / window.innerHeight
+  emberMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio()
 })
 
+// ---------------------------------------------------------------------------
+// Frame loop
+// ---------------------------------------------------------------------------
+
 let previousFrameTime = performance.now() * 0.001
+let freezeShadowsIn = -1
+
+function updateHeatSources(now) {
+  const halfFovTangent = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5))
+  let strongest = 0
+  let total = 0
+  let active = 0
+
+  for (let index = 0; index < MAX_SOURCES; index += 1) {
+    const age = now - heatSources[index].start
+    const centre = sensorPass.uniforms.uCenters.value[index]
+
+    if (age < 0 || age > params.dwell) {
+      heatUniforms.uAges.value[index] = -1
+      centre.set(0, 0, 0, 0)
+      continue
+    }
+
+    heatUniforms.uAges.value[index] = age
+    active += 1
+
+    const amplitude = Math.exp(-age * heatUniforms.uCooling.value) * params.intensity
+    strongest = Math.max(strongest, amplitude)
+    total += amplitude
+
+    projectedPoint.copy(heatSources[index].point)
+    const distanceToCamera = projectedPoint.distanceTo(camera.position)
+    projectedPoint.project(camera)
+
+    if (projectedPoint.z > 1) {
+      centre.set(0, 0, 0, 0)
+      continue
+    }
+
+    const frontRadius = params.spread * (1 - Math.exp(-age * params.diffusion))
+    const screenHeight = 2 * halfFovTangent * distanceToCamera
+    centre.set(
+      projectedPoint.x * 0.5 + 0.5,
+      projectedPoint.y * 0.5 + 0.5,
+      Math.max(frontRadius / screenHeight, 0.012),
+      Math.min(amplitude, 1.4),
+    )
+  }
+
+  peakHeat = strongest + (total - strongest) * 0.35
+
+  // With no live heat there is nothing for the shell or the haze to draw.
+  const shellsNeeded = active > 0 || params.irVision
+  if (shellsNeeded !== shellsVisible) {
+    shellsVisible = shellsNeeded
+    for (let index = 0; index < thermalShells.length; index += 1) {
+      thermalShells[index].visible = shellsNeeded
+    }
+  }
+  sensorPass.uniforms.uHazeActive.value = active > 0 ? 1 : 0
+}
+
 function animate() {
   requestAnimationFrame(animate)
+
   const now = performance.now() * 0.001
   const deltaTime = Math.min(0.05, Math.max(0, now - previousFrameTime))
   previousFrameTime = now
 
-  for (let i = 0; i < MAX_PULSES; i += 1) {
-    const normalized = (now - pulses[i].start) / params.duration
-    pulseUniforms.uTimes.value[i] = normalized >= 0 && normalized <= 1 ? normalized : -1
-  }
+  if (freezeShadowsIn > 0 && --freezeShadowsIn === 0) renderer.shadowMap.autoUpdate = false
+
+  updateHeatSources(now)
+
+  const lightBlend = Math.min(1, deltaTime * 9)
+  heatLight.intensity += (Math.min(peakHeat, 1.6) * 0.45 - heatLight.intensity) * lightBlend
+  groundHeatUniforms.uHeatAmount.value +=
+    (Math.min(peakHeat, 1.4) * 0.45 - groundHeatUniforms.uHeatAmount.value) * Math.min(1, deltaTime * 6)
 
   controls.autoRotate = params.autoRotate && !dragging
   controls.autoRotateSpeed = params.rotationSpeed
-  nightSky.position.copy(camera.position)
+
+  backdrop.position.copy(camera.position)
   skyUniforms.uTime.value = now
-  pulseUniforms.uGlobalTime.value = now
-  updateFragments(deltaTime)
+  heatUniforms.uTime.value = now
+  sensorPass.uniforms.uTime.value = now
+
+  updateEmbers(deltaTime, now)
+  updateCursor(deltaTime)
   controls.update()
   composer.render()
 }
+
+window.__dbg = { renderer, scene, ground, groundMaterial, keyLight, contactShadow }
 
 animate()
